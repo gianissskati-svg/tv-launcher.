@@ -14,38 +14,76 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
 import android.widget.*
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-// Scenic wallpaper drawn in code: sky gradient, sun glow, 3 mountain layers
+class Wall(
+    val name: String, val sky: IntArray, val glow: Int, val gx: Float, val gy: Float,
+    val peaks: IntArray, val shift: Double, val stars: Boolean
+)
+
+val WALLS = listOf(
+    Wall(
+        "Dusk", intArrayOf(0xFF1B2A49.toInt(), 0xFF6B6FA8.toInt(), 0xFFF2A97B.toInt()),
+        0x66FFE2B8, 0.72f, 0.55f,
+        intArrayOf(0xFF4A4A7A.toInt(), 0xFF35365F.toInt(), 0xFF1F2140.toInt()), 0.0, false
+    ),
+    Wall(
+        "Night", intArrayOf(0xFF05070F.toInt(), 0xFF0E1A35.toInt(), 0xFF24385F.toInt()),
+        0x4D9DB8FF, 0.25f, 0.30f,
+        intArrayOf(0xFF1A2542.toInt(), 0xFF111A33.toInt(), 0xFF0A1022.toInt()), 1.7, true
+    ),
+    Wall(
+        "Forest", intArrayOf(0xFF2C5364.toInt(), 0xFF5B8C85.toInt(), 0xFFE9D8A6.toInt()),
+        0x55FFF3C4, 0.30f, 0.62f,
+        intArrayOf(0xFF3E6B5B.toInt(), 0xFF2B4F43.toInt(), 0xFF173328.toInt()), 3.1, false
+    ),
+    Wall(
+        "Ocean", intArrayOf(0xFF0B3C5D.toInt(), 0xFF3A8FB7.toInt(), 0xFFF4D6A0.toInt()),
+        0x55FFE0A0, 0.65f, 0.60f,
+        intArrayOf(0xFF2A6F97.toInt(), 0xFF1D5578.toInt(), 0xFF0F3552.toInt()), 4.6, false
+    )
+)
+
 class Scenery(c: Context) : View(c) {
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    var wall: Wall = WALLS[0]
+        set(v) {
+            field = v
+            invalidate()
+        }
+
     override fun onDraw(cv: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        p.shader = LinearGradient(
-            0f, 0f, 0f, h,
-            intArrayOf(0xFF1B2A49.toInt(), 0xFF6B6FA8.toInt(), 0xFFF2A97B.toInt()),
-            floatArrayOf(0f, 0.6f, 1f), Shader.TileMode.CLAMP
-        )
+        p.shader = LinearGradient(0f, 0f, 0f, h, wall.sky, floatArrayOf(0f, 0.6f, 1f), Shader.TileMode.CLAMP)
         cv.drawRect(0f, 0f, w, h, p)
-        p.shader = RadialGradient(w * 0.72f, h * 0.55f, h * 0.35f, 0x66FFE2B8, 0x00FFE2B8, Shader.TileMode.CLAMP)
+        p.shader = RadialGradient(
+            w * wall.gx, h * wall.gy, h * 0.4f, wall.glow, wall.glow and 0x00FFFFFF, Shader.TileMode.CLAMP
+        )
         cv.drawRect(0f, 0f, w, h, p)
         p.shader = null
-        val layers = listOf(
-            Triple(0.62f, 0xFF4A4A7A.toInt(), 1.0f),
-            Triple(0.72f, 0xFF35365F.toInt(), 1.7f),
-            Triple(0.82f, 0xFF1F2140.toInt(), 2.6f)
-        )
-        for ((base, color, freq) in layers) {
-            p.color = color
+        if (wall.stars) {
+            val r = java.util.Random(7)
+            p.color = 0xCCFFFFFF.toInt()
+            for (i in 0 until 90) {
+                cv.drawCircle(r.nextFloat() * w, r.nextFloat() * h * 0.55f, 1f + r.nextFloat() * 2f, p)
+            }
+        }
+        val bases = floatArrayOf(0.62f, 0.72f, 0.82f)
+        val freqs = floatArrayOf(1.0f, 1.7f, 2.6f)
+        for (i in 0..2) {
+            p.color = wall.peaks[i]
             val path = Path()
             path.moveTo(0f, h)
             var x = 0f
             while (x <= w + 20f) {
-                val y = h * base - (Math.sin(x / w * 6.0 * freq + freq * 2) * h * 0.05 +
-                        Math.sin(x / w * 13.0 * freq) * h * 0.02).toFloat()
+                val y = h * bases[i] - (Math.sin(x / w * 6.0 * freqs[i] + freqs[i] * 2.0 + wall.shift) * h * 0.05 +
+                        Math.sin(x / w * 13.0 * freqs[i]) * h * 0.02).toFloat()
                 path.lineTo(x, y)
                 x += 20f
             }
@@ -57,11 +95,27 @@ class Scenery(c: Context) : View(c) {
 }
 
 class MainActivity : Activity() {
-    private lateinit var root: FrameLayout
+    private lateinit var scenery: Scenery
+    private lateinit var weatherTemp: TextView
+    private lateinit var weatherInfo: TextView
+    private lateinit var clock: TextClock
+    private lateinit var gear: ImageView
     private lateinit var dock: HorizontalScrollView
     private lateinit var row: LinearLayout
     private lateinit var overlay: FrameLayout
+    private lateinit var panel: ScrollView
+    private lateinit var panelList: LinearLayout
+    private lateinit var wallRow: TextView
+    private lateinit var clockRow: TextView
     private val soft = 0xE6FFFFFF.toInt()
+    private var allApps = listOf<ResolveInfo>()
+    private var panelOpen = false
+    private var panelReturn: View? = null
+    private var screenReturn: View? = null
+    private var screenKind = ""
+    private var lastWeather = 0L
+    private var h24 = true
+    private val prefs by lazy { getSharedPreferences("glass", MODE_PRIVATE) }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun dpf(v: Int) = v * resources.displayMetrics.density
@@ -90,6 +144,10 @@ class MainActivity : Activity() {
             .filter { it.activityInfo.packageName != packageName }
 
     private fun label(ri: ResolveInfo) = ri.loadLabel(packageManager).toString()
+    private fun key(ri: ResolveInfo) = ri.activityInfo.packageName + "/" + ri.activityInfo.name
+
+    private fun favSet(): HashSet<String> =
+        HashSet<String>(prefs.getStringSet("fav", null) ?: emptySet<String>())
 
     private fun launch(ri: ResolveInfo) {
         try {
@@ -100,6 +158,16 @@ class MainActivity : Activity() {
             )
         } catch (e: Exception) {
         }
+    }
+
+    private fun toggleFav(ri: ResolveInfo) {
+        val set = favSet()
+        val k = key(ri)
+        val added = set.add(k)
+        if (!added) set.remove(k)
+        prefs.edit().putStringSet("fav", set).apply()
+        Toast.makeText(this, if (added) "Saved to My Space" else "Removed from My Space", Toast.LENGTH_SHORT).show()
+        if (overlay.visibility == View.VISIBLE && screenKind == "myspace") showMySpace(screenReturn)
     }
 
     private fun tile(ri: ResolveInfo): FrameLayout {
@@ -125,7 +193,35 @@ class MainActivity : Activity() {
         }
         focusFx(fl, dpf(14))
         fl.setOnClickListener { launch(ri) }
+        fl.setOnLongClickListener {
+            toggleFav(ri)
+            true
+        }
         return fl
+    }
+
+    private fun panelRow(text: String, onClick: () -> Unit): TextView {
+        val t = TextView(this)
+        t.text = text
+        t.textSize = 18f
+        t.setTextColor(soft)
+        t.gravity = Gravity.CENTER_VERTICAL
+        t.setPadding(dp(24), 0, dp(24), 0)
+        t.background = glass(dpf(18))
+        focusFx(t, dpf(18))
+        t.setOnClickListener { onClick() }
+        return t
+    }
+
+    private fun applyClock() {
+        val f = if (h24) "HH:mm" else "h:mm a"
+        clock.format24Hour = f
+        clock.format12Hour = f
+    }
+
+    private fun refreshRows() {
+        wallRow.text = "Wallpaper: " + WALLS[prefs.getInt("wp", 0) % WALLS.size].name
+        clockRow.text = "Clock: " + (if (h24) "24-hour" else "12-hour")
     }
 
     override fun onCreate(s: Bundle?) {
@@ -133,58 +229,66 @@ class MainActivity : Activity() {
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        h24 = prefs.getBoolean("h24", true)
 
-        root = FrameLayout(this)
-        root.addView(Scenery(this), FrameLayout.LayoutParams(-1, -1))
+        val root = FrameLayout(this)
+        scenery = Scenery(this)
+        scenery.wall = WALLS[prefs.getInt("wp", 0) % WALLS.size]
+        root.addView(scenery, FrameLayout.LayoutParams(-1, -1))
 
-        // bottom shading for readability
         val scrim = View(this)
         scrim.background = GradientDrawable(
             GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x00000000, 0x66000000)
         )
         root.addView(scrim, FrameLayout.LayoutParams(-1, dp(300), Gravity.BOTTOM))
 
-        // upper left: date (weather comes later)
-        val date = TextView(this)
-        date.text = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(Date())
-        date.setTextColor(soft)
-        date.textSize = 20f
-        root.addView(date, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply {
-            setMargins(dp(64), dp(40), 0, 0)
+        // upper left: weather + date
+        val info = LinearLayout(this)
+        info.orientation = LinearLayout.VERTICAL
+        weatherTemp = TextView(this)
+        weatherTemp.textSize = 44f
+        weatherTemp.setTextColor(soft)
+        weatherTemp.typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+        weatherInfo = TextView(this)
+        weatherInfo.textSize = 16f
+        weatherInfo.setTextColor(soft)
+        val dateTv = TextView(this)
+        dateTv.text = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(Date())
+        dateTv.textSize = 16f
+        dateTv.setTextColor(0xB3FFFFFF.toInt())
+        info.addView(weatherTemp)
+        info.addView(weatherInfo)
+        info.addView(dateTv)
+        root.addView(info, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply {
+            setMargins(dp(64), dp(28), 0, 0)
         })
 
-        // upper right: clock + circular glass settings button
+        // upper right: clock + settings button
         val header = LinearLayout(this)
         header.gravity = Gravity.CENTER_VERTICAL
-        val clock = TextClock(this)
-        clock.format24Hour = "HH:mm"
-        clock.format12Hour = "HH:mm"
+        clock = TextClock(this)
         clock.textSize = 30f
         clock.setTextColor(soft)
         clock.fontFeatureSettings = "tnum"
         clock.typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+        applyClock()
         header.addView(clock)
-        val gear = ImageView(this)
+        gear = ImageView(this)
         gear.setImageResource(android.R.drawable.ic_menu_preferences)
         gear.setColorFilter(soft)
         gear.setPadding(dp(12), dp(12), dp(12), dp(12))
         gear.background = glass(0f, true)
         focusFx(gear, dpf(26))
-        gear.setOnClickListener {
-            try {
-                startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            } catch (e: Exception) {
-            }
-        }
+        gear.setOnClickListener { openPanel() }
         header.addView(gear, LinearLayout.LayoutParams(dp(52), dp(52)).apply { setMargins(dp(20), 0, 0, 0) })
         root.addView(header, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
             setMargins(0, dp(28), dp(64), 0)
         })
 
-        // glass dock
+        // dock
         val tv = query(Intent.CATEGORY_LEANBACK_LAUNCHER).sortedBy { label(it).lowercase() }
-        val all = (tv + query(Intent.CATEGORY_LAUNCHER))
-            .distinctBy { it.activityInfo.packageName + "/" + it.activityInfo.name }
+        allApps = (tv + query(Intent.CATEGORY_LAUNCHER))
+            .distinctBy { key(it) }
             .sortedBy { label(it).lowercase() }
 
         row = LinearLayout(this)
@@ -193,13 +297,13 @@ class MainActivity : Activity() {
         fun lp() = LinearLayout.LayoutParams(dp(144), dp(84)).apply { setMargins(0, 0, dp(16), 0) }
         tv.forEach { row.addView(tile(it), lp()) }
         val more = TextView(this)
-        more.text = "All apps"
+        more.text = "Apps"
         more.gravity = Gravity.CENTER
         more.setTextColor(soft)
         more.textSize = 18f
         more.background = glass(dpf(14))
         focusFx(more, dpf(14))
-        more.setOnClickListener { showAll(all) }
+        more.setOnClickListener { showScreen("apps", "Apps", allApps, "No apps found", currentFocus) }
         row.addView(more, lp())
 
         dock = HorizontalScrollView(this)
@@ -211,65 +315,216 @@ class MainActivity : Activity() {
             setMargins(dp(64), 0, dp(64), dp(56))
         })
 
+        // full-screen overlay for Apps / My Space
         overlay = FrameLayout(this)
         overlay.setBackgroundColor(0xE60B0F1E.toInt())
         overlay.visibility = View.GONE
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
 
+        // glass settings side panel
+        panelList = LinearLayout(this)
+        panelList.orientation = LinearLayout.VERTICAL
+        panelList.setPadding(dp(28), dp(28), dp(28), dp(28))
+        val head = TextView(this)
+        head.text = "Settings"
+        head.textSize = 28f
+        head.setTextColor(soft)
+        head.setPadding(dp(4), 0, 0, dp(20))
+        panelList.addView(head)
+        fun add(v: View) = panelList.addView(v, LinearLayout.LayoutParams(-1, dp(56)).apply {
+            setMargins(0, 0, 0, dp(10))
+        })
+        add(panelRow("System settings") {
+            try {
+                startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (e: Exception) {
+            }
+        })
+        add(panelRow("Home") {
+            closePanel(false)
+            row.getChildAt(0)?.requestFocus()
+        })
+        add(panelRow("Apps") {
+            closePanel(false)
+            showScreen("apps", "Apps", allApps, "No apps found", panelReturn)
+        })
+        add(panelRow("My Space") {
+            closePanel(false)
+            showMySpace(panelReturn)
+        })
+        add(panelRow("Search") {
+            closePanel(true)
+            try {
+                startActivity(Intent(Intent.ACTION_ASSIST).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (e: Exception) {
+                Toast.makeText(this, "Search is not available", Toast.LENGTH_SHORT).show()
+            }
+        })
+        wallRow = panelRow("") {
+            val idx = (prefs.getInt("wp", 0) + 1) % WALLS.size
+            prefs.edit().putInt("wp", idx).apply()
+            scenery.wall = WALLS[idx]
+            refreshRows()
+        }
+        add(wallRow)
+        clockRow = panelRow("") {
+            h24 = !h24
+            prefs.edit().putBoolean("h24", h24).apply()
+            applyClock()
+            refreshRows()
+        }
+        add(clockRow)
+        refreshRows()
+
+        panel = ScrollView(this)
+        panel.addView(panelList)
+        panel.background = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xE6141A2E.toInt(), 0xE60B0F1E.toInt())
+        ).apply {
+            cornerRadius = dpf(32)
+            setStroke(dp(1), 0x66FFFFFF)
+        }
+        panel.clipToOutline = true
+        panel.visibility = View.GONE
+        panel.translationX = dpf(460)
+        root.addView(panel, FrameLayout.LayoutParams(dp(420), -1, Gravity.END).apply {
+            setMargins(0, dp(24), dp(24), dp(24))
+        })
+
         setContentView(root)
         root.post { row.getChildAt(0)?.requestFocus() }
     }
 
-    private fun showAll(all: List<ResolveInfo>) {
-        overlay.removeAllViews()
-        val grid = GridLayout(this)
-        grid.columnCount = 5
-        all.forEach { ri ->
-            val cell = LinearLayout(this)
-            cell.orientation = LinearLayout.VERTICAL
-            cell.addView(tile(ri), LinearLayout.LayoutParams(dp(144), dp(84)))
-            val name = TextView(this)
-            name.text = label(ri)
-            name.setTextColor(soft)
-            name.textSize = 14f
-            name.maxLines = 1
-            name.ellipsize = TextUtils.TruncateAt.END
-            name.gravity = Gravity.CENTER
-            name.setPadding(0, dp(8), 0, 0)
-            cell.addView(name, LinearLayout.LayoutParams(dp(144), -2))
-            grid.addView(cell, GridLayout.LayoutParams().apply { setMargins(dp(8), dp(8), dp(8), dp(14)) })
+    override fun onResume() {
+        super.onResume()
+        if (System.currentTimeMillis() - lastWeather > 20 * 60 * 1000) {
+            lastWeather = System.currentTimeMillis()
+            loadWeather()
         }
-        val sv = ScrollView(this)
-        sv.clipToPadding = false
-        sv.setPadding(dp(56), dp(104), dp(56), dp(48))
-        sv.addView(grid)
-        overlay.addView(sv, FrameLayout.LayoutParams(-1, -1))
-        val title = TextView(this)
-        title.text = "All apps"
-        title.setTextColor(soft)
-        title.textSize = 28f
-        overlay.addView(title, FrameLayout.LayoutParams(-2, -2).apply { setMargins(dp(64), dp(36), 0, 0) })
-        overlay.alpha = 0f
-        overlay.visibility = View.VISIBLE
-        overlay.animate().alpha(1f).setDuration(250).start()
-        ((grid.getChildAt(0) as? ViewGroup)?.getChildAt(0))?.requestFocus()
     }
 
-    private fun hideAll() {
-        overlay.animate().alpha(0f).setDuration(200).withEndAction {
-            overlay.visibility = View.GONE
+    private fun httpGet(u: String): String {
+        val c = URL(u).openConnection() as HttpURLConnection
+        c.connectTimeout = 8000
+        c.readTimeout = 8000
+        return try {
+            c.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    private fun describe(c: Int) = when (c) {
+        0 -> "Clear"
+        1, 2, 3 -> "Partly cloudy"
+        45, 48 -> "Fog"
+        in 51..57 -> "Drizzle"
+        in 61..67, in 80..82 -> "Rain"
+        in 71..77, 85, 86 -> "Snow"
+        95, 96, 99 -> "Thunderstorm"
+        else -> "Cloudy"
+    }
+
+    private fun loadWeather() {
+        Thread {
+            try {
+                val loc = JSONObject(httpGet("https://ipwho.is/"))
+                val lat = loc.getDouble("latitude")
+                val lon = loc.getDouble("longitude")
+                val city = loc.optString("city", "")
+                val wx = JSONObject(
+                    httpGet("https://api.open-meteo.com/v1/forecast?latitude=$lat&longitude=$lon&current=temperature_2m,weather_code")
+                )
+                val cur = wx.getJSONObject("current")
+                val t = Math.round(cur.getDouble("temperature_2m")).toInt()
+                val code = cur.getInt("weather_code")
+                runOnUiThread {
+                    weatherTemp.text = "$t°"
+                    weatherInfo.text = city + " · " + describe(code)
+                }
+            } catch (e: Exception) {
+            }
         }.start()
-        row.getChildAt(row.childCount - 1)?.requestFocus()
     }
 
-    override fun onBackPressed() {
-        if (overlay.visibility == View.VISIBLE) hideAll()
+    private fun setBackgroundFocus(enabled: Boolean) {
+        dock.descendantFocusability =
+            if (enabled) ViewGroup.FOCUS_AFTER_DESCENDANTS else ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        gear.isFocusable = enabled
     }
 
-    override fun onNewIntent(intent: Intent?) {
-        super.onNewIntent(intent)
-        if (overlay.visibility == View.VISIBLE) hideAll()
-        dock.smoothScrollTo(0, 0)
-        row.getChildAt(0)?.requestFocus()
+    private fun openPanel() {
+        if (panelOpen) return
+        panelOpen = true
+        panelReturn = currentFocus
+        setBackgroundFocus(false)
+        panel.visibility = View.VISIBLE
+        panel.animate().translationX(0f).setDuration(300).start()
+        panelList.getChildAt(1)?.requestFocus()
     }
-}
+
+    private fun closePanel(restore: Boolean) {
+        if (!panelOpen) return
+        panelOpen = false
+        panel.animate().translationX(dpf(460)).setDuration(250).withEndAction {
+            panel.visibility = View.GONE
+        }.start()
+        setBackgroundFocus(true)
+        if (restore) (panelReturn ?: row.getChildAt(0))?.requestFocus()
+    }
+
+    private fun showMySpace(ret: View?) {
+        val favs = favSet()
+        showScreen(
+            "myspace", "My Space", allApps.filter { favs.contains(key(it)) },
+            "Nothing saved yet.\nHold OK on any app to save it here.", ret
+        )
+    }
+
+    private fun showScreen(kind: String, title: String, list: List<ResolveInfo>, empty: String, ret: View?) {
+        screenKind = kind
+        screenReturn = ret
+        setBackgroundFocus(false)
+        overlay.removeAllViews()
+        overlay.isFocusable = list.isEmpty()
+        var first: View? = null
+        if (list.isEmpty()) {
+            val e = TextView(this)
+            e.text = empty
+            e.textSize = 20f
+            e.gravity = Gravity.CENTER
+            e.setTextColor(0x99FFFFFF.toInt())
+            overlay.addView(e, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+        } else {
+            val grid = GridLayout(this)
+            grid.columnCount = 5
+            list.forEach { ri ->
+                val cell = LinearLayout(this)
+                cell.orientation = LinearLayout.VERTICAL
+                val t = tile(ri)
+                if (first == null) first = t
+                cell.addView(t, LinearLayout.LayoutParams(dp(144), dp(84)))
+                val name = TextView(this)
+                name.text = label(ri)
+                name.setTextColor(soft)
+                name.textSize = 14f
+                name.maxLines = 1
+                name.ellipsize = TextUtils.TruncateAt.END
+                name.gravity = Gravity.CENTER
+                name.setPadding(0, dp(8), 0, 0)
+                cell.addView(name, LinearLayout.LayoutParams(dp(144), -2))
+                grid.addView(cell, GridLayout.LayoutParams().apply { setMargins(dp(8), dp(8), dp(8), dp(14)) })
+            }
+            val sv = ScrollView(this)
+            sv.clipToPadding = false
+            sv.setPadding(dp(56), dp(104), dp(56), dp(48))
+            sv.addView(grid)
+            overlay.addView(sv, FrameLayout.LayoutParams(-1, -1))
+        }
+        val titleTv = TextView(this)
+        titleTv.text = title
+        titleTv.setTextColor(soft)
+        titleTv.textSize = 28f
+        overlay.addView(titleTv, FrameLayout.LayoutParams(-2, -2).apply { setMargins(dp(64), dp(36), 0, 0) })
+        overlay.alpha = 0f
+   
